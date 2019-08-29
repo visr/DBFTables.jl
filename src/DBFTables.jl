@@ -1,6 +1,6 @@
 module DBFTables
 
-using DataFrames, Printf
+using DataFrames, Printf, Tables
 
 # Read DBF files in xBase format
 # Files written in this format have the extension .dbf
@@ -8,7 +8,7 @@ using DataFrames, Printf
 
 struct DBFFieldDescriptor
 	nam::String
-	typ::Type
+	typ::DataType
 	len::Int8
 	dec::Int8
 end
@@ -45,7 +45,7 @@ function dbf_field_type(fld::Char, dec::UInt8)
 	elseif fld == 'L'
 		rt = Bool
 	else
-		 warn("Unknown record type: $(fld)")
+		throw(ArgumentError("Unknown record type $fld"))
 	end
 	return rt
 end
@@ -98,43 +98,49 @@ function read_dbf_records!(io::IO, df::DataFrame, header::DBFHeader; deleted=fal
 		is_deleted = (read(io, UInt8) == 0x2A)
 		r = Any[]
 		for i = 1:length(header.fields)
-			#print("P: $(position(io)) ")
-			fld_data = read!(io, Vector{UInt8}(undef, header.fields[i].len))
-			#println("D: $(ascii(fld_data))")
+			fld_data = String(read(io, header.fields[i].len))
 			if header.fields[i].typ == Bool
-				logical = Char(fld_data[1])
-				if logical in ['Y', 'y', 'T', 't']
+				logical = first(fld_data)
+				if logical in "YyTt"
 					push!(r, true)
-				elseif logical in ['N', 'n', 'F', 'f']
+				elseif logical in "NnFf"
 					push!(r, false)
 				else
 					push!(r, missing)
 				end
 			elseif header.fields[i].typ == Int
-				tmp = tryparse(header.fields[i].typ, String(fld_data))
-				push!(r, tmp==nothing ? missing : tmp)
+				tmp = tryparse(header.fields[i].typ, fld_data)
+				push!(r, tmp === nothing ? missing : tmp)
 			elseif header.fields[i].typ == Float64
-				tmp = tryparse(header.fields[i].typ, String(fld_data))
-				push!(r, tmp==nothing ? missing : tmp)
+				tmp = tryparse(header.fields[i].typ, fld_data)
+				push!(r, tmp === nothing ? missing : tmp)
 			elseif header.fields[i].typ == String
-				push!(r, strip(String(fld_data)))
+				push!(r, strip(fld_data))
 			elseif header.fields[i].typ == Nothing
 				push!(r, missing)
 			else
-				warn("Type $(header.fields[i].typ) is not supported")
+				throw(ArgumentError("Type is not supported: $(header.fields[i].typ)"))
 			end
 		end
 		if !is_deleted || deleted
+			@show r
 			push!(df, r)
 		end
 		rc += 1
-		#println("R: $(position(io)), $(eof(io)), $(rc) ")
 	end
 	return df
 end
 
 function read_dbf(io::IO; deleted=false)
-    header = read_dbf_header(io)
+	header = read_dbf_header(io)
+	
+	# create Tables.Schema
+	names = getfield.(header.fields, :nam)
+	# since missing is always supported, add it to the schema types
+	types = map(T -> Union{T, Missing}, getfield.(header.fields, :typ))
+	dbfschema = Tables.Schema(names, types)
+	@show dbfschema.names dbfschema.types
+
 	df = DataFrame(map(f->Union{f.typ,Missing}, header.fields), map(f->Symbol(f.nam), header.fields), 0)
 	read_dbf_records!(io, df, header; deleted=deleted)
 	return df
