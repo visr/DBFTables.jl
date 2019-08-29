@@ -6,6 +6,9 @@ using DataFrames, Printf, Tables
 # Files written in this format have the extension .dbf
 # Implemented: dBase III+ (w/o memo)
 
+# changes to note:
+# String: strip to rstrip
+
 struct DBFFieldDescriptor
 	nam::String
 	typ::DataType
@@ -92,63 +95,63 @@ function read_dbf_header(io::IO)
 					 fields)
 end
 
-function read_dbf_records!(io::IO, df::DataFrame, header::DBFHeader; deleted=false)
-	rc = 0
-	while header.records != rc
-		is_deleted = (read(io, UInt8) == 0x2A)
+miss(x) = ifelse(x === nothing, missing, x)
+
+function dbf_value(T::Type{Bool}, str::AbstractString)
+	char = first(str)
+	if char in "YyTt"
+		true
+	elseif char in "NnFf"
+		false
+	elseif char == '?'
+		missing
+	else
+		throw(ArgumentError("Unknown logical $char"))
+	end
+end
+
+dbf_value(T::Union{Type{Int}, Type{Float64}}, str::AbstractString) = miss(tryparse(T, str))
+dbf_value(T::Type{String}, str::AbstractString) = rstrip(str)
+dbf_value(T::Type{Nothing}, str::AbstractString) = missing
+
+function read_dbf_records!(io::IO, df::DataFrame, header::DBFHeader)
+
+	# create Tables.Schema
+	names = getfield.(header.fields, :nam)
+	# since missing is always supported, add it to the schema types
+	types_notmissing = getfield.(header.fields, :typ)
+	types = map(T -> Union{T, Missing}, types_notmissing)
+	dbfschema = Tables.Schema(names, types)
+	nrow = header.records
+	ncol = length(header.fields)
+
+	for _ in 1:nrow
+		# skip deleted records
+		read(io, UInt8) == 0x2A && continue
 		r = Any[]
-		for i = 1:length(header.fields)
-			fld_data = String(read(io, header.fields[i].len))
-			if header.fields[i].typ == Bool
-				logical = first(fld_data)
-				if logical in "YyTt"
-					push!(r, true)
-				elseif logical in "NnFf"
-					push!(r, false)
-				else
-					push!(r, missing)
-				end
-			elseif header.fields[i].typ == Int
-				tmp = tryparse(header.fields[i].typ, fld_data)
-				push!(r, tmp === nothing ? missing : tmp)
-			elseif header.fields[i].typ == Float64
-				tmp = tryparse(header.fields[i].typ, fld_data)
-				push!(r, tmp === nothing ? missing : tmp)
-			elseif header.fields[i].typ == String
-				push!(r, strip(fld_data))
-			elseif header.fields[i].typ == Nothing
-				push!(r, missing)
-			else
-				throw(ArgumentError("Type is not supported: $(header.fields[i].typ)"))
-			end
+		for col = 1:ncol
+			# read value to a String
+			fld_data = String(read(io, header.fields[col].len))
+			# convert String to the specified data type
+			v = dbf_value(types_notmissing[col], fld_data)
+			push!(r, v)
 		end
-		if !is_deleted || deleted
-			@show r
-			push!(df, r)
-		end
-		rc += 1
+		@show r
+		push!(df, r)
 	end
 	return df
 end
 
-function read_dbf(io::IO; deleted=false)
+function read_dbf(io::IO)
 	header = read_dbf_header(io)
-	
-	# create Tables.Schema
-	names = getfield.(header.fields, :nam)
-	# since missing is always supported, add it to the schema types
-	types = map(T -> Union{T, Missing}, getfield.(header.fields, :typ))
-	dbfschema = Tables.Schema(names, types)
-	@show dbfschema.names dbfschema.types
-
 	df = DataFrame(map(f->Union{f.typ,Missing}, header.fields), map(f->Symbol(f.nam), header.fields), 0)
-	read_dbf_records!(io, df, header; deleted=deleted)
+	read_dbf_records!(io, df, header)
 	return df
 end
 
-function read_dbf(fnm::String; deleted=false)
+function read_dbf(fnm::String)
 	io = open(fnm)
-	df = read_dbf(io; deleted=deleted)
+	df = read_dbf(io)
 	close(io)
 	return df
 end
