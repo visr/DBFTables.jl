@@ -8,9 +8,12 @@ using DataFrames, Printf, Tables
 
 # changes to note:
 # String: strip to rstrip
+# DBFFieldDescriptor.nam: String to Symbol
+# TODO implement iterator and getindex based on .len
+# TODO implement Tables.columns
 
 struct DBFFieldDescriptor
-	nam::String
+	nam::Symbol
 	typ::DataType
 	len::Int8
 	dec::Int8
@@ -54,7 +57,7 @@ function dbf_field_type(fld::Char, dec::UInt8)
 end
 
 function read_dbf_field(io::IO)
-	field_name = strip(replace(String(read!(io, Vector{UInt8}(undef, 11))),'\0'=>' ')) # 0x00
+	field_name = Symbol(strip(replace(String(read!(io, Vector{UInt8}(undef, 11))),'\0'=>' '))) # 0x00
 	field_type = read(io, Char)  # 0x0B
 	read(io, Int32) # skip 0x0C
 	field_len = read(io, UInt8) # 0x10
@@ -114,28 +117,27 @@ dbf_value(T::Union{Type{Int}, Type{Float64}}, str::AbstractString) = miss(trypar
 dbf_value(T::Type{String}, str::AbstractString) = rstrip(str)
 dbf_value(T::Type{Nothing}, str::AbstractString) = missing
 
+dbf_string(io::IO, nb::Integer) = String(read(io, nb))
+
 function read_dbf_records!(io::IO, df::DataFrame, header::DBFHeader)
 
 	# create Tables.Schema
-	names = getfield.(header.fields, :nam)
+	names = Tuple(getfield.(header.fields, :nam))
 	# since missing is always supported, add it to the schema types
-	types_notmissing = getfield.(header.fields, :typ)
-	types = map(T -> Union{T, Missing}, types_notmissing)
+	types_notmissing = Tuple(getfield.(header.fields, :typ))
+	types = Tuple{map(T -> Union{T, Missing}, types_notmissing)...}
 	dbfschema = Tables.Schema(names, types)
+	nbytes = Tuple(getfield.(header.fields, :len))
+	@show names types dbfschema
 	nrow = header.records
 	ncol = length(header.fields)
 
 	for _ in 1:nrow
 		# skip deleted records
 		read(io, UInt8) == 0x2A && continue
-		r = Any[]
-		for col = 1:ncol
-			# read value to a String
-			fld_data = String(read(io, header.fields[col].len))
-			# convert String to the specified data type
-			v = dbf_value(types_notmissing[col], fld_data)
-			push!(r, v)
-		end
+		r = NamedTuple{names, types}(
+			(dbf_value(types_notmissing[col], String(read(io, nbytes[col]))) for col in 1:ncol)
+		)
 		@show r
 		push!(df, r)
 	end
@@ -144,7 +146,7 @@ end
 
 function read_dbf(io::IO)
 	header = read_dbf_header(io)
-	df = DataFrame(map(f->Union{f.typ,Missing}, header.fields), map(f->Symbol(f.nam), header.fields), 0)
+	df = DataFrame(map(f->Union{f.typ,Missing}, header.fields), getfield.(header.fields, :nam), 0)
 	read_dbf_records!(io, df, header)
 	return df
 end

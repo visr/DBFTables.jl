@@ -34,8 +34,8 @@ df = DBFTables.read_dbf(joinpath(dir, "test.dbf"))
 @test ismissing(df[6, :NUMERIC])
 @test ismissing(df[7, :INTEGER])
 
-float_field_descriptor = DBFTables.DBFFieldDescriptor("FloatField", Float64, 8, 1)
-bool_field_descriptor = DBFTables.DBFFieldDescriptor("BoolField", Bool, 1, 0)
+float_field_descriptor = DBFTables.DBFFieldDescriptor(:FloatField, Float64, 8, 1)
+bool_field_descriptor = DBFTables.DBFFieldDescriptor(:BoolField, Bool, 1, 0)
 fields = [float_field_descriptor, bool_field_descriptor]
 fieldnames = Tuple(Symbol.(getfield.(fields, :nam)))
 fieldtypes = Tuple{getfield.(fields, :typ)...}
