@@ -8,18 +8,21 @@ using DataFrames, Printf, Tables
 
 # changes to note:
 # String: strip to rstrip
-# DBFFieldDescriptor.nam: String to Symbol
+# FieldDescriptor.nam: String to Symbol
 # TODO implement iterator and getindex based on .len
 # TODO implement Tables.columns
+# TODO rename read_dbf and remove filename version?
+# Date DataType as Date
+# removed DBF from struct names
 
-struct DBFFieldDescriptor
+struct FieldDescriptor
 	nam::Symbol
 	typ::DataType
 	len::Int8
 	dec::Int8
 end
 
-struct DBFHeader
+struct Header
 	version::UInt8
 	lastUpdate::String
 	records::Int32
@@ -29,10 +32,10 @@ struct DBFHeader
 	encrypted::Bool
 	mdx::Bool
 	langId::UInt8
-	fields::Vector{DBFFieldDescriptor}
+	fields::Vector{FieldDescriptor}
 end
 
-function dbf_field_type(fld::Char, dec::UInt8)
+function typemap(fld::Char, dec::UInt8)
 	rt = Nothing
 	if fld == 'C'
 		rt = String
@@ -42,12 +45,13 @@ function dbf_field_type(fld::Char, dec::UInt8)
 		if dec > 0
 			rt = Float64
 		else
+			# TODO do we want this?
 			rt = Int
 		end
 	elseif fld == 'F' || fld == 'O'
 		rt = Float64
 	elseif fld == 'I' || fld == '+'
-		rt = Integer
+		rt = Int
 	elseif fld == 'L'
 		rt = Bool
 	else
@@ -63,10 +67,10 @@ function read_dbf_field(io::IO)
 	field_len = read(io, UInt8) # 0x10
 	field_dec = read(io, UInt8) # 0x11
 	read!(io, Vector{UInt8}(undef, 14)) # reserved
-	return DBFFieldDescriptor(field_name, dbf_field_type(field_type, field_dec), field_len, field_dec)
+	return FieldDescriptor(field_name, typemap(field_type, field_dec), field_len, field_dec)
 end
 
-function read_dbf_header(io::IO)
+function Header(io::IO)
 	ver = read(io, UInt8)
 	date = read!(io, Vector{UInt8}(undef, 3)) # 0x01
 	last_update = @sprintf("%4d%02d%02d", date[1]+1900, date[2], date[3])
@@ -80,7 +84,7 @@ function read_dbf_header(io::IO)
 	mdx = Bool(read(io, UInt8)) # 0x1C
 	langId = read(io, UInt8) # 0x1D
 	read!(io, Vector{UInt8}(undef, 2)) # reserved # 0x1E
-	fields = DBFFieldDescriptor[]
+	fields = FieldDescriptor[]
 
 	while !eof(io)
 		push!(fields, read_dbf_field(io))
@@ -93,7 +97,7 @@ function read_dbf_header(io::IO)
 		end
 	end
 
-	return DBFHeader(ver, last_update, records, hsize, rsize,
+	return Header(ver, last_update, records, hsize, rsize,
 					 incomplete, encrypted, mdx, langId,
 					 fields)
 end
@@ -117,10 +121,7 @@ dbf_value(T::Union{Type{Int}, Type{Float64}}, str::AbstractString) = miss(trypar
 dbf_value(T::Type{String}, str::AbstractString) = rstrip(str)
 dbf_value(T::Type{Nothing}, str::AbstractString) = missing
 
-dbf_string(io::IO, nb::Integer) = String(read(io, nb))
-
-function read_dbf_records!(io::IO, df::DataFrame, header::DBFHeader)
-
+function read_dbf_records!(io::IO, df::DataFrame, header::Header)
 	# create Tables.Schema
 	names = Tuple(getfield.(header.fields, :nam))
 	# since missing is always supported, add it to the schema types
@@ -144,17 +145,22 @@ function read_dbf_records!(io::IO, df::DataFrame, header::DBFHeader)
 	return df
 end
 
-function read_dbf(io::IO)
-	header = read_dbf_header(io)
-	df = DataFrame(map(f->Union{f.typ,Missing}, header.fields), getfield.(header.fields, :nam), 0)
-	read_dbf_records!(io, df, header)
-	return df
+# FieldDescriptor, use type parameters?
+struct Table
+	header::Header
+	data::Vector{UInt8}
 end
 
-function read_dbf(fnm::String)
-	io = open(fnm)
-	df = read_dbf(io)
-	close(io)
+# struct Row{names, T} where {names, T <: Tuple}
+# 	nt::NamedTuple{names, types}
+# end
+
+# load whole table in a mmapped Vector{UInt8}?
+# or can we mmap a Vector{NamedTuple?}
+function Table(io::IO)
+	header = Header(io)
+	df = DataFrame(map(f->Union{f.typ,Missing}, header.fields), getfield.(header.fields, :nam), 0)
+	read_dbf_records!(io, df, header)
 	return df
 end
 
