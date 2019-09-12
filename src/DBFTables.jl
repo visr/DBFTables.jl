@@ -61,13 +61,15 @@ function typemap(fld::Char, dec::UInt8)
 end
 
 function read_dbf_field(io::IO)
-	field_name = Symbol(strip(replace(String(read!(io, Vector{UInt8}(undef, 11))),'\0'=>' '))) # 0x00
-	field_type = read(io, Char)  # 0x0B
-	read(io, Int32) # skip 0x0C
-	field_len = read(io, UInt8) # 0x10
-	field_dec = read(io, UInt8) # 0x11
-	read!(io, Vector{UInt8}(undef, 14)) # reserved
-	return FieldDescriptor(field_name, typemap(field_type, field_dec), field_len, field_dec)
+	field_name_raw = String(read!(io, Vector{UInt8}(undef, 11)))
+	field_name = Symbol(strip(replace(field_name_raw, '\0'=>' ')))
+	field_type = read(io, Char)
+	read(io, Int32) # skip
+	field_len = read(io, UInt8)
+	field_dec = read(io, UInt8)
+	read!(io, nb=14) # reserved
+	jltype = typemap(field_type, field_dec)
+	return FieldDescriptor(field_name, jltype, field_len, field_dec)
 end
 
 function Header(io::IO)
