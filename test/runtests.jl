@@ -1,8 +1,10 @@
 using DBFTables
 using Test
+using Tables
+using WeakRefStrings
 
 test_dbf_path = joinpath(@__DIR__, "test.dbf")
-df = DBFTables.Table(open(test_dbf_path))
+df, t = DBFTables.Table(open(test_dbf_path))
 
 #=
 │ Row │ CHAR    │ DATE     │ BOOL    │ FLOAT     │ NUMERIC   │ INTEGER    │
@@ -38,3 +40,19 @@ fields = [float_field_descriptor, bool_field_descriptor]
 fieldnames = Tuple(Symbol.(getfield.(fields, :nam)))
 fieldtypes = Tuple{getfield.(fields, :typ)...}
 nt = NamedTuple{fieldnames, fieldtypes}((2.1, true))
+
+header = DBFTables.Header(open(test_dbf_path))
+@show header
+
+# create Tables.Schema
+names = Tuple(getfield.(header.fields, :nam))
+# since missing is always supported, add it to the schema types
+types_notmissing = Tuple(getfield.(header.fields, :typ))
+types = Tuple{map(T -> Union{T, Missing}, types_notmissing)...}
+dbfschema = Tables.Schema(names, types)
+nbytes = Tuple(getfield.(header.fields, :len))
+
+nrow = header.records
+ncol = length(header.fields)
+
+@show t.strings

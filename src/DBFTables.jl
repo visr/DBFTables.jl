@@ -1,6 +1,6 @@
 module DBFTables
 
-using DataFrames, Printf, Tables
+using DataFrames, Printf, Tables, WeakRefStrings
 
 # Read DBF files in xBase format
 # Files written in this format have the extension .dbf
@@ -67,7 +67,7 @@ function read_dbf_field(io::IO)
 	read(io, Int32) # skip
 	field_len = read(io, UInt8)
 	field_dec = read(io, UInt8)
-	read!(io, nb=14) # reserved
+	read(io, 14) # reserved
 	jltype = typemap(field_type, field_dec)
 	return FieldDescriptor(field_name, jltype, field_len, field_dec)
 end
@@ -148,9 +148,11 @@ function read_dbf_records!(io::IO, df::DataFrame, header::Header)
 end
 
 # FieldDescriptor, use type parameters?
+# should the schema go in here? don't think so
 struct Table
 	header::Header
-	data::Vector{UInt8}
+	data::Vector{UInt8}  # WeakRefString reference this
+	strings::StringArray{WeakRefString{UInt8}, 2}
 end
 
 # struct Row{names, T} where {names, T <: Tuple}
@@ -161,9 +163,40 @@ end
 # or can we mmap a Vector{NamedTuple?}
 function Table(io::IO)
 	header = Header(io)
+	@show position(io)
 	df = DataFrame(map(f->Union{f.typ,Missing}, header.fields), getfield.(header.fields, :nam), 0)
 	read_dbf_records!(io, df, header)
-	return df
+	# TODO how to account for deleted records?
+	# -> reserve the memory, just make sure to skip them when needed
+	# -> we should probably add a test file with skipped records
+	seek(io, header.hsize)  # go back to the start of the data
+	data = Vector{UInt8}(undef, header.rsize * header.records)
+	read!(io, data)
+	strings = _create_stringarray(header, data)
+	# 6 fields 7 records
+	# 225 bytes header, 55 byte record
+	# 55 includes the deleted marker
+	# 7 * 55 = 385 bytes data += 225 = 610 bytes header+data = 610
+	# plus there is a 1A sub byte at the end, seen more often but not always, sometime multiple
+	# http://www.dbase.com/Knowledgebase/INT/db7_file_fmt.htm
+	t = Table(header, data, strings)
+	return df, t
+end
+
+function _create_stringarray(header::Header, data::AbstractVector)
+	# first make the lengths and offsets for a single record
+	lengths_record = UInt32.(getfield.(header.fields, :len))
+	offsets_record = vcat(0, cumsum(lengths_record)[1:end-1]) .+ 1
+
+	# the lengths are equal for each record
+	lengths = repeat(lengths_record, 1, header.records)
+	# the offsets accumulate over records with the record size
+	row_offsets = range(0; length=header.records, step=header.rsize)
+	offsets = repeat(offsets_record, 1, header.records)
+	offsets .+= reshape(row_offsets, 1, :)
+
+	StringArray{WeakRefString{UInt8}, 2}(data, offsets, lengths)
 end
 
 end # module
+# https://github.com/JuliaData/CSV.jl/issues/482#issuecomment-523742097
