@@ -6,9 +6,17 @@ using DataFrames, Printf, Tables, WeakRefStrings
 # Files written in this format have the extension .dbf
 # Implemented: dBase III+ (w/o memo)
 
+# resources
+# http://shapelib.maptools.org/
+# https://www.clicketyclick.dk/databases/xbase/format/
+# https://en.wikipedia.org/wiki/.dbf
+# http://www.independent-software.com/dbase-dbf-dbt-file-format.html
+# https://www.clicketyclick.dk/databases/xbase/format/dbf.html
+
 # changes to note:
 # String: strip to rstrip
 # FieldDescriptor.nam: String to Symbol
+# change signed fields to unsigned, like FieldDescriptor.len
 # TODO implement iterator and getindex based on .len
 # TODO implement Tables.columns
 # TODO rename read_dbf and remove filename version?
@@ -18,16 +26,16 @@ using DataFrames, Printf, Tables, WeakRefStrings
 struct FieldDescriptor
 	nam::Symbol
 	typ::DataType
-	len::Int8
-	dec::Int8
+	len::UInt8
+	dec::UInt8
 end
 
 struct Header
 	version::UInt8
 	lastUpdate::String
-	records::Int32
-	hsize::Int16
-	rsize::Int16
+	records::UInt32
+	hsize::UInt16
+	rsize::UInt16
 	incomplete::Bool
 	encrypted::Bool
 	mdx::Bool
@@ -64,44 +72,45 @@ function read_dbf_field(io::IO)
 	field_name_raw = String(read!(io, Vector{UInt8}(undef, 11)))
 	field_name = Symbol(strip(replace(field_name_raw, '\0'=>' ')))
 	field_type = read(io, Char)
-	read(io, Int32) # skip
+	skip(io, 4)  # skip
 	field_len = read(io, UInt8)
 	field_dec = read(io, UInt8)
-	read(io, 14) # reserved
+	skip(io, 14)  # reserved
 	jltype = typemap(field_type, field_dec)
 	return FieldDescriptor(field_name, jltype, field_len, field_dec)
 end
 
 function Header(io::IO)
 	ver = read(io, UInt8)
-	date = read!(io, Vector{UInt8}(undef, 3)) # 0x01
-	last_update = @sprintf("%4d%02d%02d", date[1]+1900, date[2], date[3])
-	records = read(io, Int32) # 0x04
-	hsize = read(io, Int16) # 0x08
-	rsize = read(io, Int16) # 0x0A
-	read(io, Int16) # reserved # 0x0C
-	incomplete = Bool(read(io, UInt8)) # 0x0E
-	encrypted = Bool(read(io, UInt8)) # 0x0F
-	read!(io, Vector{UInt8}(undef, 12)) # reserved
-	mdx = Bool(read(io, UInt8)) # 0x1C
-	langId = read(io, UInt8) # 0x1D
-	read!(io, Vector{UInt8}(undef, 2)) # reserved # 0x1E
+	date1 = read(io, UInt8)
+	date2 = read(io, UInt8)
+	date3 = read(io, UInt8)
+	last_update = @sprintf("%4d%02d%02d", date1+1900, date2, date3)
+	records = read(io, UInt32)
+	hsize = read(io, UInt16)
+	rsize = read(io, UInt16)
+	skip(io, 2)  # reserved
+	incomplete = Bool(read(io, UInt8))
+	encrypted = Bool(read(io, UInt8))
+	skip(io, 12)  # reserved
+	mdx = Bool(read(io, UInt8))
+	langId = read(io, UInt8)
+	skip(io, 2)  # reserved
 	fields = FieldDescriptor[]
 
 	while !eof(io)
 		push!(fields, read_dbf_field(io))
-		p = position(io)
+		mark(io)
 		trm = read(io, UInt8)
 		if trm == 0xD
 			break
 		else
-			seek(io, p)
+			reset(io)
 		end
 	end
 
 	return Header(ver, last_update, records, hsize, rsize,
-					 incomplete, encrypted, mdx, langId,
-					 fields)
+				  incomplete, encrypted, mdx, langId, fields)
 end
 
 miss(x) = ifelse(x === nothing, missing, x)
@@ -120,67 +129,28 @@ function dbf_value(T::Type{Bool}, str::AbstractString)
 end
 
 dbf_value(T::Union{Type{Int}, Type{Float64}}, str::AbstractString) = miss(tryparse(T, str))
-dbf_value(T::Type{String}, str::AbstractString) = rstrip(str)
+# String to avoid returning SubString{WeakRefString{UInt8}}
+dbf_value(T::Type{String}, str::AbstractString) = String(rstrip(str))
 dbf_value(T::Type{Nothing}, str::AbstractString) = missing
 
-function read_dbf_records!(io::IO, df::DataFrame, header::Header)
-	# create Tables.Schema
-	names = Tuple(getfield.(header.fields, :nam))
-	# since missing is always supported, add it to the schema types
-	types_notmissing = Tuple(getfield.(header.fields, :typ))
-	types = Tuple{map(T -> Union{T, Missing}, types_notmissing)...}
-	dbfschema = Tables.Schema(names, types)
-	nbytes = Tuple(getfield.(header.fields, :len))
-	@show names types dbfschema
-	nrow = header.records
-	ncol = length(header.fields)
-
-	for _ in 1:nrow
-		# skip deleted records
-		read(io, UInt8) == 0x2A && continue
-		r = NamedTuple{names, types}(
-			(dbf_value(types_notmissing[col], String(read(io, nbytes[col]))) for col in 1:ncol)
-		)
-		@show r
-		push!(df, r)
-	end
-	return df
-end
-
-# FieldDescriptor, use type parameters?
-# should the schema go in here? don't think so
 struct Table
 	header::Header
 	data::Vector{UInt8}  # WeakRefString reference this
 	strings::StringArray{WeakRefString{UInt8}, 2}
 end
 
-# struct Row{names, T} where {names, T <: Tuple}
-# 	nt::NamedTuple{names, types}
-# end
+header(dbf::Table) = getfield(dbf, :header)
+fields(dbf::Table) = header(dbf).fields
+strings(dbf::Table) = getfield(dbf, :strings)
 
-# load whole table in a mmapped Vector{UInt8}?
-# or can we mmap a Vector{NamedTuple?}
 function Table(io::IO)
 	header = Header(io)
-	@show position(io)
-	df = DataFrame(map(f->Union{f.typ,Missing}, header.fields), getfield.(header.fields, :nam), 0)
-	read_dbf_records!(io, df, header)
-	# TODO how to account for deleted records?
-	# -> reserve the memory, just make sure to skip them when needed
-	# -> we should probably add a test file with skipped records
-	seek(io, header.hsize)  # go back to the start of the data
+	# consider using mmap here for big dbf files
 	data = Vector{UInt8}(undef, header.rsize * header.records)
 	read!(io, data)
 	strings = _create_stringarray(header, data)
-	# 6 fields 7 records
-	# 225 bytes header, 55 byte record
-	# 55 includes the deleted marker
-	# 7 * 55 = 385 bytes data += 225 = 610 bytes header+data = 610
-	# plus there is a 1A sub byte at the end, seen more often but not always, sometime multiple
-	# http://www.dbase.com/Knowledgebase/INT/db7_file_fmt.htm
-	t = Table(header, data, strings)
-	return df, t
+	dbf = Table(header, data, strings)
+	return dbf
 end
 
 function _create_stringarray(header::Header, data::AbstractVector)
@@ -198,5 +168,84 @@ function _create_stringarray(header::Header, data::AbstractVector)
 	StringArray{WeakRefString{UInt8}, 2}(data, offsets, lengths)
 end
 
+function _create_namedtuple(dbf::Table, row::Integer)
+    ncol = length(fields(dbf))
+	sch = Tables.Schema(dbf)
+	record = strings(dbf)[:, row]
+    NamedTuple{sch.names, sch.types}(
+        (dbf_value(fields(dbf)[col].typ, record[col]) for col in 1:ncol)
+    )
+end
+
+
+# Tables interface
+
+Base.isempty(dbf::Table) = header(dbf).records == 0
+
+# We currently ignore the deleted flag, as I haven't come across a file in the
+# wild yet that has them. This QGIS issue seems to suggest that many softwares
+# don't handle them, and therefore QGIS itself now also always packs files,
+# i.e. removes the deleted records entirely https://issues.qgis.org/issues/11007#note-30
+# If needed, the isdeleted functions below can be used to find deleted records.
+
+function isdeleted(dbf::Table, row::Integer)
+	data = getfield(dbf, :data)
+	i = (row - 1) * header(dbf).rsize + 1
+	data[i] == 0x2a
+end
+
+function isdeleted(dbf::Table)
+	data = getfield(dbf, :data)
+	rsize = header(dbf).rsize
+	nrow = header(dbf).records
+	idx = range(1, step=rsize, length=nrow)
+	data[idx] .== 0x2a
+end
+
+function Base.iterate(dbf::Table)
+    isempty(dbf) && return nothing
+	data = getfield(dbf, :data)
+	data[1, 1] == 0x2a
+    nt = DBFTables._create_namedtuple(dbf, 1)
+    return nt, 2
+end
+
+function Base.iterate(dbf::Table, st)
+    st > header(dbf).records && return nothing
+    nt = DBFTables._create_namedtuple(dbf, st)
+    return nt, st + 1
+end
+
+Tables.istable(::Type{Table}) = true
+Tables.rowaccess(::Type{Table}) = true
+Tables.columnaccess(::Type{Table}) = true
+Tables.rows(dbf::Table) = dbf
+Tables.columns(dbf::Table) = dbf
+
+function Tables.schema(dbf::Table)
+	names = Tuple(field.nam for field in fields(dbf))
+	# since missing is always supported, add it to the schema types
+	types = Tuple{(Union{field.typ, Missing} for field in fields(dbf))...}
+	Tables.Schema(names, types)
+end
+
+
+Base.propertynames(dbf::Table) = getfield.(getfield(dbf, :header).fields, :nam)
+
+function Base.getproperty(dbf::Table, nm::Symbol)
+    col = findfirst(x -> x === nm, propertynames(dbf))
+	nrow = header(dbf).records
+	type = fields(dbf)[col].typ
+	str = strings(dbf)
+	[dbf_value(type, str[col, i]) for i = 1:nrow]
+end
+
+# AbstractArray interface
+
+# TODO decide on Vector vs Matrix
+# old DataFrame behavior had
+# size(dbf) = (6, 7) and dbf[2, :CHAR] == "John"
+# But the Tables model is AbstractVector of NamedTuple
+# which seems to suggest a Vector
+
 end # module
-# https://github.com/JuliaData/CSV.jl/issues/482#issuecomment-523742097
