@@ -1,27 +1,6 @@
 module DBFTables
 
-using DataFrames, Printf, Tables, WeakRefStrings
-
-# Read DBF files in xBase format
-# Files written in this format have the extension .dbf
-# Implemented: dBase III+ (w/o memo)
-
-# resources
-# http://shapelib.maptools.org/
-# https://www.clicketyclick.dk/databases/xbase/format/
-# https://en.wikipedia.org/wiki/.dbf
-# http://www.independent-software.com/dbase-dbf-dbt-file-format.html
-# https://www.clicketyclick.dk/databases/xbase/format/dbf.html
-
-# changes to note:
-# String: strip to rstrip
-# FieldDescriptor.nam: String to Symbol
-# change signed fields to unsigned, like FieldDescriptor.len
-# TODO implement iterator and getindex based on .len
-# TODO implement Tables.columns
-# TODO rename read_dbf and remove filename version?
-# Date DataType as Date
-# removed DBF from struct names
+using Printf, Tables, WeakRefStrings
 
 struct FieldDescriptor
 	nam::Symbol
@@ -239,13 +218,5 @@ function Base.getproperty(dbf::Table, nm::Symbol)
 	str = strings(dbf)
 	[dbf_value(type, str[col, i]) for i = 1:nrow]
 end
-
-# AbstractArray interface
-
-# TODO decide on Vector vs Matrix
-# old DataFrame behavior had
-# size(dbf) = (6, 7) and dbf[2, :CHAR] == "John"
-# But the Tables model is AbstractVector of NamedTuple
-# which seems to suggest a Vector
 
 end # module

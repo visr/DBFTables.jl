@@ -2,7 +2,6 @@ using DBFTables
 using Test
 using Tables
 using WeakRefStrings
-using DBFTables: dbf_value, Table, header, strings
 using DataFrames
 
 test_dbf_path = joinpath(@__DIR__, "test.dbf")
