@@ -10,17 +10,17 @@ struct FieldDescriptor
 	ndec::UInt8
 end
 
-"DBF header"
+"DBF header, which also holds all field definitions"
 struct Header
 	version::UInt8
-	lastUpdate::String
+	last_update::String
 	records::UInt32
 	hsize::UInt16
 	rsize::UInt16
 	incomplete::Bool
 	encrypted::Bool
 	mdx::Bool
-	langId::UInt8
+	lang_id::UInt8
 	fields::Vector{FieldDescriptor}
 end
 
@@ -131,15 +131,27 @@ header(dbf::Table) = getfield(dbf, :header)
 fields(dbf::Table) = header(dbf).fields
 strings(dbf::Table) = getfield(dbf, :strings)
 
-"Read a stream to a DBF Table struct"
+"""
+	DBFTables.Table(source) => DBFTables.Table
+
+Read a source, a path to a file or an opened stream, to a DBFTables.Table.
+This type conforms to the Tables interface, so it can be easily converted
+to other formats. It is possible to iterate through the rows of this object,
+or to retrieve columns like `dbf.fieldname`.
+"""
 function Table(io::IO)
 	header = Header(io)
 	# consider using mmap here for big dbf files
 	data = Vector{UInt8}(undef, header.rsize * header.records)
 	read!(io, data)
 	strings = _create_stringarray(header, data)
-	dbf = Table(header, data, strings)
-	return dbf
+	Table(header, data, strings)
+end
+
+function Table(path::AbstractString)
+	open(path) do io
+		Table(io)
+	end
 end
 
 "Collect all the offsets and lenghts from the header to create a StringArray"
@@ -161,9 +173,11 @@ end
 "Create a NamedTuple representing a single row"
 function _create_namedtuple(dbf::Table, row::Integer)
     ncol = length(fields(dbf))
-	sch = Tables.Schema(dbf)
+	sch = Tables.schema(dbf)
 	record = strings(dbf)[:, row]
-    NamedTuple{sch.names, sch.types}(
+	# convert typle of types to a tuple type, needed for NamedTuple
+	ttypes = Tuple{sch.types...}
+    NamedTuple{sch.names, ttypes}(
         (dbf_value(fields(dbf)[col].type, record[col]) for col in 1:ncol)
     )
 end
@@ -214,7 +228,7 @@ Tables.columns(dbf::Table) = dbf
 function Tables.schema(dbf::Table)
 	names = Tuple(field.name for field in fields(dbf))
 	# since missing is always supported, add it to the schema types
-	types = Tuple{(Union{field.type, Missing} for field in fields(dbf))...}
+	types = Tuple(Union{field.type, Missing} for field in fields(dbf))
 	Tables.Schema(names, types)
 end
 
