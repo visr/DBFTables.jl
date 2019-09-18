@@ -2,13 +2,15 @@ module DBFTables
 
 using Printf, Tables, WeakRefStrings
 
+"Field/column descriptor, part of the Header"
 struct FieldDescriptor
-	nam::Symbol
-	typ::DataType
-	len::UInt8
-	dec::UInt8
+	name::Symbol
+	type::DataType
+	length::UInt8
+	ndec::UInt8
 end
 
+"DBF header"
 struct Header
 	version::UInt8
 	lastUpdate::String
@@ -22,14 +24,16 @@ struct Header
 	fields::Vector{FieldDescriptor}
 end
 
-function typemap(fld::Char, dec::UInt8)
+"Convert DBF data type characters to Julia types"
+function typemap(fld::Char, ndec::UInt8)
+	# https://www.clicketyclick.dk/databases/xbase/format/data_types.html
 	rt = Nothing
 	if fld == 'C'
 		rt = String
 	elseif fld == 'D'
 		rt = String
 	elseif fld == 'N'
-		if dec > 0
+		if ndec > 0
 			rt = Float64
 		else
 			# TODO do we want this?
@@ -47,6 +51,7 @@ function typemap(fld::Char, dec::UInt8)
 	return rt
 end
 
+"Read a field descriptor from the stream, and create a FieldDescriptor struct"
 function read_dbf_field(io::IO)
 	field_name_raw = String(read!(io, Vector{UInt8}(undef, 11)))
 	field_name = Symbol(strip(replace(field_name_raw, '\0'=>' ')))
@@ -59,6 +64,7 @@ function read_dbf_field(io::IO)
 	return FieldDescriptor(field_name, jltype, field_len, field_dec)
 end
 
+"Read a DBF header from a stream"
 function Header(io::IO)
 	ver = read(io, UInt8)
 	date1 = read(io, UInt8)
@@ -94,6 +100,7 @@ end
 
 miss(x) = ifelse(x === nothing, missing, x)
 
+"Concert a DBF entry string to a Julia value"
 function dbf_value(T::Type{Bool}, str::AbstractString)
 	char = first(str)
 	if char in "YyTt"
@@ -112,16 +119,19 @@ dbf_value(T::Union{Type{Int}, Type{Float64}}, str::AbstractString) = miss(trypar
 dbf_value(T::Type{String}, str::AbstractString) = String(rstrip(str))
 dbf_value(T::Type{Nothing}, str::AbstractString) = missing
 
+"DBF"
 struct Table
 	header::Header
 	data::Vector{UInt8}  # WeakRefString reference this
 	strings::StringArray{WeakRefString{UInt8}, 2}
 end
 
+"Access the header of a DBF Table"
 header(dbf::Table) = getfield(dbf, :header)
 fields(dbf::Table) = header(dbf).fields
 strings(dbf::Table) = getfield(dbf, :strings)
 
+"Read a stream to a DBF Table struct"
 function Table(io::IO)
 	header = Header(io)
 	# consider using mmap here for big dbf files
@@ -132,9 +142,10 @@ function Table(io::IO)
 	return dbf
 end
 
+"Collect all the offsets and lenghts from the header to create a StringArray"
 function _create_stringarray(header::Header, data::AbstractVector)
 	# first make the lengths and offsets for a single record
-	lengths_record = UInt32.(getfield.(header.fields, :len))
+	lengths_record = UInt32.(getfield.(header.fields, :length))
 	offsets_record = vcat(0, cumsum(lengths_record)[1:end-1]) .+ 1
 
 	# the lengths are equal for each record
@@ -147,32 +158,19 @@ function _create_stringarray(header::Header, data::AbstractVector)
 	StringArray{WeakRefString{UInt8}, 2}(data, offsets, lengths)
 end
 
+"Create a NamedTuple representing a single row"
 function _create_namedtuple(dbf::Table, row::Integer)
     ncol = length(fields(dbf))
 	sch = Tables.Schema(dbf)
 	record = strings(dbf)[:, row]
     NamedTuple{sch.names, sch.types}(
-        (dbf_value(fields(dbf)[col].typ, record[col]) for col in 1:ncol)
+        (dbf_value(fields(dbf)[col].type, record[col]) for col in 1:ncol)
     )
 end
 
-
-# Tables interface
-
 Base.isempty(dbf::Table) = header(dbf).records == 0
 
-# We currently ignore the deleted flag, as I haven't come across a file in the
-# wild yet that has them. This QGIS issue seems to suggest that many softwares
-# don't handle them, and therefore QGIS itself now also always packs files,
-# i.e. removes the deleted records entirely https://issues.qgis.org/issues/11007#note-30
-# If needed, the isdeleted functions below can be used to find deleted records.
-
-function isdeleted(dbf::Table, row::Integer)
-	data = getfield(dbf, :data)
-	i = (row - 1) * header(dbf).rsize + 1
-	data[i] == 0x2a
-end
-
+"Get a BitVector which is true for rows that are marked as deleted"
 function isdeleted(dbf::Table)
 	data = getfield(dbf, :data)
 	rsize = header(dbf).rsize
@@ -181,6 +179,17 @@ function isdeleted(dbf::Table)
 	data[idx] .== 0x2a
 end
 
+"Check if the row is marked as deleted"
+function isdeleted(dbf::Table, row::Integer)
+	data = getfield(dbf, :data)
+	i = (row - 1) * header(dbf).rsize + 1
+	data[i] == 0x2a
+end
+
+
+### the functions below implement the Tables interface
+
+"Iterate over the rows of a DBF Table, yielding a NamedTuple for each row"
 function Base.iterate(dbf::Table)
     isempty(dbf) && return nothing
 	data = getfield(dbf, :data)
@@ -201,20 +210,22 @@ Tables.columnaccess(::Type{Table}) = true
 Tables.rows(dbf::Table) = dbf
 Tables.columns(dbf::Table) = dbf
 
+"Get the Tables.Schema of a DBF Table"
 function Tables.schema(dbf::Table)
-	names = Tuple(field.nam for field in fields(dbf))
+	names = Tuple(field.name for field in fields(dbf))
 	# since missing is always supported, add it to the schema types
-	types = Tuple{(Union{field.typ, Missing} for field in fields(dbf))...}
+	types = Tuple{(Union{field.type, Missing} for field in fields(dbf))...}
 	Tables.Schema(names, types)
 end
 
+"List all available DBF column names"
+Base.propertynames(dbf::Table) = getfield.(getfield(dbf, :header).fields, :name)
 
-Base.propertynames(dbf::Table) = getfield.(getfield(dbf, :header).fields, :nam)
-
+"Get an entire DBF column as a Vector. Usage: `dbf.myfield`"
 function Base.getproperty(dbf::Table, nm::Symbol)
     col = findfirst(x -> x === nm, propertynames(dbf))
 	nrow = header(dbf).records
-	type = fields(dbf)[col].typ
+	type = fields(dbf)[col].type
 	str = strings(dbf)
 	[dbf_value(type, str[col, i]) for i = 1:nrow]
 end
